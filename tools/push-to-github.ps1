@@ -16,7 +16,7 @@
 
  脚本会做四件事：
 
-   ① 找到本机可用的 git（找不到就退回 WorkBuddy 自带的便携版）
+   ① 找到本机可用的 git（找不到就退回用户目录下的便携版）
    ② 设置**本仓库**的提交身份（只写 .git/config，不动你的全局配置）
    ③ 把已有提交的作者/提交者改成配置区里的身份
    ④ 添加 / 更新 origin 远程，然后 push
@@ -44,8 +44,8 @@ try {
 # ─── 配置区：只需要改这一段 ──────────────────────────────────────────────
 $GhUser   = ""                                   # 你的 GitHub 用户名；留空则运行时询问
 $RepoName = "mob-difficulty-tuner"               # 仓库名
-$GitName  = "IRELIA"                             # commit 作者名
-$GitEmail = "irelia@users.noreply.github.com"    # commit 作者邮箱（建议用 GitHub 的 noreply 邮箱）
+$GitName  = ""                                   # commit 作者名；留空则自动取 git 全局配置
+$GitEmail = ""                                   # commit 作者邮箱；留空则自动取 git 全局配置
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -58,14 +58,16 @@ function Stop-Here  { param([string]$Text) Write-Host "`n[错误] $Text" -Foregr
 # ── 1. 定位 git ──────────────────────────────────────────────────────────
 Write-Step "定位 git"
 
-$portableRoot = Join-Path $env:USERPROFILE ".workbuddy\binaries\PortableGit\versions\1.2.0"
 $candidates = @()
 $onPath = Get-Command git -ErrorAction SilentlyContinue
 if ($onPath) { $candidates += $onPath.Source }
 $candidates += (Join-Path $env:LOCALAPPDATA "Programs\Git\cmd\git.exe")
 $candidates += "C:\Program Files\Git\cmd\git.exe"
 $candidates += "C:\Program Files (x86)\Git\cmd\git.exe"
-$candidates += (Join-Path $portableRoot "mingw64\bin\git.exe")
+
+# 兜底：部分集成环境会在用户目录下随附便携版 git。用通配符探测，不写死版本号。
+$portableGlob = Join-Path $env:USERPROFILE "*\binaries\PortableGit\versions\*\mingw64\bin\git.exe"
+$candidates += @(Get-ChildItem -Path $portableGlob -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 
 $Git = $null
 foreach ($c in $candidates) {
@@ -76,10 +78,10 @@ if (-not $Git) {
 }
 Write-Ok "git = $Git"
 
-# 便携版 git 的 libexec 是空的，必须显式指定 GIT_EXEC_PATH，否则 https 推送会报
-# "git: 'remote-https' is not a git command"。
-if ($Git -like "*$portableRoot*") {
-    $env:GIT_EXEC_PATH = Join-Path $portableRoot "mingw64\bin"
+# 便携版 git 的 libexec 目录往往是空的，必须显式指定 GIT_EXEC_PATH，
+# 否则 https 推送会报 "git: 'remote-https' is not a git command"。
+if ($Git -like "*\PortableGit\versions\*\mingw64\bin\git.exe") {
+    $env:GIT_EXEC_PATH = Split-Path -Parent $Git
     Write-Warn "使用便携版 git，已设置 GIT_EXEC_PATH"
 }
 
@@ -127,10 +129,21 @@ if (-not $GhUser) { Stop-Here "GitHub 用户名不能为空" }
 # ── 5. 设置本仓库的提交身份 ──────────────────────────────────────────────
 Write-Step "设置本仓库提交身份"
 
+# 配置区留空时自动推导：优先用 git 全局配置，其次用 GitHub 用户名兜底
+if (-not $GitName -or -not $GitEmail) {
+    $gName = ((& $Git --global user.name  2>$null) | Select-Object -First 1)
+    $gMail = ((& $Git --global user.email 2>$null) | Select-Object -First 1)
+    if ($gName) { $gName = $gName.Trim() }
+    if ($gMail) { $gMail = $gMail.Trim() }
+    if (-not $GitName)  { if ($gName) { $GitName  = $gName } else { $GitName  = $GhUser } }
+    if (-not $GitEmail) { if ($gMail) { $GitEmail = $gMail } else { $GitEmail = "$GhUser@users.noreply.github.com" } }
+    Write-Warn "配置区为空，已自动推导提交身份"
+}
+
 & $Git config --local user.name  $GitName
 & $Git config --local user.email $GitEmail
 & $Git config --local core.quotepath false
-Write-Ok "$GitName <$GitEmail>"
+Write-Ok "本仓库身份 → $GitName <$GitEmail>"
 
 # 只有一个提交时，顺手把作者/提交者一并改成上面的身份
 $commitCount = [int](& $Git rev-list --count HEAD)
